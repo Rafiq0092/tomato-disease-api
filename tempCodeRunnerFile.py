@@ -1,0 +1,1 @@
+STAGE1_BEST_PATH = "models/tomato_hybrid_r50_dn121_mnv2_customcnn_stage2_best.keras"
