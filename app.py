@@ -9,10 +9,24 @@ from flask_cors import CORS
 
 import tensorflow as tf
 
+import gdown
 
+MODEL_URL = "https://drive.google.com/uc?export=download&id=1mWcEHDMa2WOVcF1FxkcOk-6HkpRGJfAO"
+MODEL_PATH = "models/model.h5"
+
+
+def download_model():
+    if not os.path.exists(MODEL_PATH):
+        os.makedirs("models", exist_ok=True)
+        print("⬇ Downloading model from Google Drive...")
+        gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
+        print("✅ Model downloaded successfully")
+
+
+download_model()
 
 IMG_SIZE = (220 , 220)
-STAGE1_BEST_PATH = "models\model.h5"
+STAGE1_BEST_PATH = MODEL_PATH
 
 #classes
 CLASS_NAMES = ["Early_blight", "Healthy", "Late_blight"]
