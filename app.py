@@ -8,12 +8,13 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 import tensorflow as tf
-
 import gdown
 
+# ==============================
+# MODEL DOWNLOAD CONFIG
+# ==============================
 MODEL_URL = "https://drive.google.com/uc?export=download&id=1mWcEHDMa2WOVcF1FxkcOk-6HkpRGJfAO"
 MODEL_PATH = "models/model.h5"
-
 
 def download_model():
     if not os.path.exists(MODEL_PATH):
@@ -22,16 +23,16 @@ def download_model():
         gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
         print("✅ Model downloaded successfully")
 
-
 download_model()
 
-IMG_SIZE = (220 , 220)
+# ==============================
+# CONFIG
+# ==============================
+IMG_SIZE = (220, 220)
 STAGE1_BEST_PATH = MODEL_PATH
 
-#classes
 CLASS_NAMES = ["Early_blight", "Healthy", "Late_blight"]
 
- #Live Server runs at 5500
 FRONTEND_ORIGINS = [
     "http://127.0.0.1:5500",
     "http://localhost:5500",
@@ -39,8 +40,9 @@ FRONTEND_ORIGINS = [
 
 CONFIDENCE_THRESHOLD = 0.60
 
-# about Disease Knowledge 
-
+# ==============================
+# DISEASE KB
+# ==============================
 DISEASE_KB = {
     "Early_blight": {
         "pathogen": "Alternaria solani (Fungus)",
@@ -89,91 +91,68 @@ DISEASE_KB = {
         "medicine_spray": [],
         "remedy": [
             "Continue monitoring (2–3 times/week)",
-            "Maintain balanced nutrition (avoid excess nitrogen)",
-            "Avoid overhead irrigation; keep foliage dry",
-            "Remove weeds and improve airflow"
+            "Maintain balanced nutrition",
+            "Avoid overhead irrigation",
+            "Improve airflow"
         ],
         "prevention": [
-            "Keep field clean and remove debris",
-            "Ensure proper spacing and airflow",
-            "Use healthy seed/seedlings",
-            "Monitor regularly for early symptoms"
+            "Keep field clean",
+            "Ensure proper spacing",
+            "Use healthy seedlings",
+            "Monitor regularly"
         ]
     }
 }
 
-# Flask App
-
+# ==============================
+# FLASK APP
+# ==============================
 app = Flask(__name__)
 
-# allow frontend to call /health and /predict
-CORS(
-    app,
-    resources={r"/*": {"origins": FRONTEND_ORIGINS}},
-    supports_credentials=False
-)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 MODEL = None
 
-
+# ==============================
+# MODEL LOADER (LAZY LOAD)
+# ==============================
 def load_model_once():
     global MODEL
     if MODEL is None:
-        if not os.path.exists(STAGE1_BEST_PATH):
-            raise FileNotFoundError(f"Model not found at: {STAGE1_BEST_PATH}")
+        print("⚡ Loading model...")
         MODEL = tf.keras.models.load_model(STAGE1_BEST_PATH, compile=False)
+        print("✅ Model loaded")
     return MODEL
 
-
-def preprocess_image(file_bytes: bytes, img_size=(192, 192)) -> np.ndarray:
-  
+# ==============================
+# PREPROCESS
+# ==============================
+def preprocess_image(file_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-    img = img.resize(img_size)
+    img = img.resize(IMG_SIZE)
     x = np.asarray(img, dtype=np.float32)
     x = np.expand_dims(x, axis=0)
     return x
 
+# ==============================
+# PREDICT
+# ==============================
+def predict_one(model, x):
+    probs = model.predict(x, verbose=0)[0]
+    idx = int(np.argmax(probs))
+    return CLASS_NAMES[idx], float(probs[idx])
 
-def advisory_for(pred_class: str) -> dict:
-    
-    info = DISEASE_KB.get(pred_class, None)
-    if info is None:
-        return {
-            "pathogen": None,
-            "medicine_spray": [],
-            "remedy": ["Advisory not available. Please consult an expert."],
-            "prevention": []
-        }
-    # Ensure keys exist
-    return {
-        "pathogen": info.get("pathogen", None),
-        "medicine_spray": info.get("medicine_spray", []),
-        "remedy": info.get("remedy", []),
-        "prevention": info.get("prevention", [])
-    }
+# ==============================
+# ROUTES
+# ==============================
 
-
-def predict_one(model, x: np.ndarray):
-    probs = model.predict(x, verbose=0)[0].astype(np.float32)
-    pred_idx = int(np.argmax(probs))
-    pred_class = CLASS_NAMES[pred_idx]
-    confidence = float(probs[pred_idx])
-    return probs, pred_idx, pred_class, confidence
-
-
-# Routes (for frontend)
+# 🔥 FIXED: health does NOT load model
 @app.route("/health", methods=["GET"])
 def health():
-    try:
-        _ = load_model_once()
-        return jsonify({
-            "status": "ok",
-            "classes": CLASS_NAMES,
-            "img_size": list(IMG_SIZE),
-            "model_path": STAGE1_BEST_PATH
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
+    return jsonify({
+        "status": "ok",
+        "message": "API running"
+    })
 
 
 @app.route("/predict", methods=["POST"])
@@ -181,61 +160,39 @@ def predict():
     try:
         model = load_model_once()
 
-        # Frontend sends
         if "file" not in request.files:
-            return jsonify({"error": "No file uploaded. Use form-data key='file'."}), 400
+            return jsonify({"error": "No file uploaded"}), 400
 
-        f = request.files["file"]
-        if not f or f.filename.strip() == "":
-            return jsonify({"error": "Empty file."}), 400
+        file = request.files["file"]
+        file_bytes = file.read()
 
-        file_bytes = f.read()
-        if not file_bytes:
-            return jsonify({"error": "Empty file bytes."}), 400
+        x = preprocess_image(file_bytes)
 
-        x = preprocess_image(file_bytes, IMG_SIZE)
+        start = time.time()
+        pred_class, confidence = predict_one(model, x)
+        latency = (time.time() - start) * 1000
 
-        t0 = time.time()
-        probs, pred_idx, pred_class, confidence = predict_one(model, x)
-        latency_ms = (time.time() - t0) * 1000.0
-
-        
-        advisory = advisory_for(pred_class)
-
-        # optional warning
-        warning = None
-        if confidence < CONFIDENCE_THRESHOLD:
-            warning = (
-                "Capture a clearer image: single leaf, good light, no blur, "
-                "minimal background, close-up symptoms visible."
-            )
-
-        # JSON response schema
         return jsonify({
-            "filename": f.filename,
             "predicted_class": pred_class,
-            "latency_ms": round(latency_ms, 2),
-            "advisory": advisory,
-            "warning": warning
+            "confidence": confidence,
+            "latency_ms": round(latency, 2)
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/reload", methods=["POST"])
-def reload_model():
-    global MODEL
-    try:
-        MODEL = None
-        tf.keras.backend.clear_session()
-        load_model_once()
-        return jsonify({"status": "reloaded"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+
+@app.route("/")
+def home():
+    return "Tomato API is running"
 
 
-
+# ==============================
+# MAIN (IMPORTANT FIX)
+# ==============================
 if __name__ == "__main__":
-    load_model_once()
+    # ❌ REMOVE THIS (IMPORTANT)
+    # load_model_once()
+
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
